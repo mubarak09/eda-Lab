@@ -88,6 +88,21 @@ export class EDAAppStack extends cdk.Stack {
     }
   );
 
+    const addMetadataFn = new lambdanode.NodejsFunction(
+      this, 
+      "addMetadataFn", 
+      {
+          runtime: lambda.Runtime.NODEJS_20_X,
+          entry: `${__dirname}/../lambdas/addImageMetadata.ts`,
+          timeout: cdk.Duration.seconds(15),
+          memorySize: 128,
+          environment: {
+            TABLE_NAME: imagesTable.tableName,
+            //REGION: "eu-west-1", // needed because the lambda code uses process.env.REGION
+          },
+    }
+  );
+
     // S3 --> SQS
     imagesBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
@@ -95,10 +110,52 @@ export class EDAAppStack extends cdk.Stack {
     );
 
     newImageTopic.addSubscription(
-      new subs.SqsSubscription(imageProcessQueue)
-    );
+      new subs.SqsSubscription(imageProcessQueue, {
+        filterPolicyWithMessageBody: {
+          Records: sns.FilterOrPolicy.policy({
+            s3: sns.FilterOrPolicy.policy({
+              object: sns.FilterOrPolicy.policy({
+                key: sns.FilterOrPolicy.filter(
+                  sns.SubscriptionFilter.stringFilter({
+                    matchPrefixes: ["image"],
+                 })
+             ),
+            }),
+           }),
+          }),
+        },
+        rawMessageDelivery: true,
+      })
+ );
 
-    newImageTopic.addSubscription(new subs.SqsSubscription(mailerQ));
+    newImageTopic.addSubscription(
+      new subs.SqsSubscription(mailerQ, {
+        filterPolicyWithMessageBody: {
+          Records: sns.FilterOrPolicy.policy({
+            s3: sns.FilterOrPolicy.policy({
+              object: sns.FilterOrPolicy.policy({
+                key: sns.FilterOrPolicy.filter(
+                  sns.SubscriptionFilter.stringFilter({
+                    matchPrefixes: ["image"],
+                  })
+                ),
+              }),
+            }),
+           }),
+         },
+        rawMessageDelivery: true,
+      })
+ );
+
+    newImageTopic.addSubscription(
+      new subs.LambdaSubscription(addMetadataFn, {
+        filterPolicy: {
+          metadata_type: sns.SubscriptionFilter.stringFilter({
+            allowlist: ["Caption", "Date", "Photographer"],
+          }),
+        },
+      })
+    );
 
    // SQS --> Lambda
     const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
@@ -126,6 +183,7 @@ export class EDAAppStack extends cdk.Stack {
 
     imagesBucket.grantRead(persistImageDataFn);
     imagesTable.grantReadWriteData(persistImageDataFn);
+    imagesTable.grantReadWriteData(addMetadataFn);
 
     
     mailerFn.addToRolePolicy(
@@ -144,6 +202,10 @@ export class EDAAppStack extends cdk.Stack {
     
     new cdk.CfnOutput(this, "bucketName", {
       value: imagesBucket.bucketName,
+    });
+
+    new cdk.CfnOutput(this, "SNS Topic ARN", {
+      value: newImageTopic.topicArn ,
     });
   }
 }
